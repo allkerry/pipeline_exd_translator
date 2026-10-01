@@ -12,6 +12,7 @@ RUN pip install --no-cache-dir \
     yake \
     "tiktoken>=0.5.0" \
     "langdetect>=1.0.9" \
+    "requests>=2.31.0" \
     "aioprometheus>=23.0.0"
 
 # exorde_data без рекурсивных сабмодулей — см. комментарий в bpipe/Dockerfile

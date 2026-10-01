@@ -6,7 +6,7 @@ Bpipe (standalone) — принимает обработанные элемен�
 Слушает: POST / на BPIPE_PORT (по умолчанию 7995)
 Отправляет в: TRANSACTIONEER_URL (по умолчанию http://127.0.0.1:8002/commit)
 
-Адаптировано для локального запуска на RTX 3050 8GB.
+Рассчитан на NVIDIA P106-100 (6 ГБ, Pascal).
 """
 import asyncio
 import gc
@@ -52,7 +52,7 @@ log = logging.getLogger(__name__)
 # ─── Конфигурация ─────────────────────────────────────────────
 BPIPE_PORT           = int(os.getenv("BPIPE_PORT", "7995"))
 TRANSACTIONEER_URL   = os.getenv("TRANSACTIONEER_URL", "http://127.0.0.1:8002")
-FIXED_BATCH_SIZE     = int(os.getenv("FIXED_BATCH_SIZE", "6"))     # Меньше для RTX 3050
+FIXED_BATCH_SIZE     = int(os.getenv("FIXED_BATCH_SIZE", "64"))
 BATCH_TIMEOUT_SECS   = float(os.getenv("BATCH_TIMEOUT_SECONDS", "3.0"))
 MAX_QUEUE_SIZE       = int(os.getenv("MAX_QUEUE_SIZE", "100"))      # Сбрасывать старые если очередь растёт
 

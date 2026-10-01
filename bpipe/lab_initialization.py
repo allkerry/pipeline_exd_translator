@@ -82,9 +82,13 @@ def initialize_models(device):
         _zs_tokenizer.model_max_length = 512
     else:
         _zs_tokenizer.model_max_length = min(_zs_tokenizer.model_max_length, 512)
-    # fp16 только на GPU (device>=0) — на CPU половинная точность не ускоряет,
-    # а местами вообще не поддерживается ядрами PyTorch.
-    _dtype = torch.float16 if device >= 0 else None
+    # BPIPE_TORCH_DTYPE=float32 (дефолт; Pascal/P106-100: fp16 там идёт со скоростью
+    # 1/64 от fp32) | float16. На CPU (device<0) dtype не задаём.
+    _dtype_name = os.getenv("BPIPE_TORCH_DTYPE", "float32").strip().lower()
+    if _dtype_name not in ("float16", "float32"):
+        raise ValueError(f"BPIPE_TORCH_DTYPE должен быть float16 или float32, получено: {_dtype_name!r}")
+    _dtype = (torch.float16 if _dtype_name == "float16" else torch.float32) if device >= 0 else None
+    logging.info(f"[TAGGING] torch dtype для HF-моделей: {_dtype}")
     _zs_model = AutoModelForSequenceClassification.from_pretrained(_zs_id, torch_dtype=_dtype)
     models["zs_pipe"] = pipeline(
         "zero-shot-classification",
@@ -206,7 +210,8 @@ def lab_initialization():
         torch.cuda.empty_cache()
         logging.info(
             f"[LAB INIT] {torch.cuda.get_device_name(0)} — "
-            f"{torch.cuda.get_device_properties(0).total_memory / 1024**3:.1f}GB"
+            f"{torch.cuda.get_device_properties(0).total_memory / 1024**3:.1f}GB — "
+            f"sm_{torch.cuda.get_device_capability(0)[0]}{torch.cuda.get_device_capability(0)[1]}"
         )
 
     mappings = {

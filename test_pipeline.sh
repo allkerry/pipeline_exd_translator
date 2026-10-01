@@ -3,6 +3,7 @@ set -uo pipefail
 cd "$(dirname "$0")"
 
 COLLECTOR_URL="${COLLECTOR_URL:-http://localhost:9000}"
+GPU_LIMIT_MIB="${GPU_LIMIT_MIB:-6144}"
 PASS=0
 FAIL=0
 RESULTS=()
@@ -28,7 +29,7 @@ assert_field() {
 
 # ─── 1. Здоровье всех сервисов ─────────────────────────────────
 test_health() {
-    local services=("collector:9000" "upipe:5981" "bpipe:7995" "transactioneer:8002")
+    local services=("collector:9000" "upipe:5981" "bpipe:7995" "transactioneer:8002" "translator:8003")
     for svc in "${services[@]}"; do
         name="${svc%%:*}"; port="${svc##*:}"
         if [ "$name" = "collector" ]; then
@@ -61,7 +62,7 @@ test_vpn_egress() {
     fi
 }
 
-# ─── 3. Нормальный текст проходит весь пайплайн (4.4) ──────────
+# ─── 3. Нормальный текст проходит весь пайплайн ────────────────
 test_normal_text() {
     local eid="test-normal-$(date +%s)"
     local resp
@@ -82,14 +83,14 @@ test_normal_text() {
     fi
 }
 
-# ─── 4. Слишком короткий текст (4.5) ───────────────────────────
+# ─── 4. Слишком короткий текст ─────────────────────────────────
 test_short_text() {
     local resp
     resp=$(post_store_item "{\"content\": \"f\", \"external_id\": \"test-short-$(date +%s)\", \"created_at\": \"$(now_iso)\", \"domain\": \"twitter.com\", \"url\": \"https://twitter.com/test/status/2\"}")
     assert_field "short_text" "$resp" "skipped_short"
 }
 
-# ─── 5. Длинный текст не должен ронять батч (4.6) ──────────────
+# ─── 5. Длинный текст не должен ронять батч ────────────────────
 test_long_text() {
     local long_text
     long_text=$(python3 -c "print(('This is a very long repeated sentence about markets and finance and technology. ' * 400))")
@@ -99,10 +100,10 @@ test_long_text() {
     assert_field "long_text store_item" "$resp" "OK"
 
     sleep 6
-    if docker compose logs upipe --since 30s 2>/dev/null | grep -q "✂️"; then
-        log_pass "long_text token truncation logged"
+    if docker compose logs upipe --since 30s 2>/dev/null | grep -q "Токен-лимит превышен"; then
+        log_pass "long_text token limit logged"
     else
-        log_fail "long_text token truncation logged" "нет строки ✂️ в логах upipe"
+        log_fail "long_text token limit logged" "нет строки 'Токен-лимит превышен' в логах upipe"
     fi
 
     if docker compose logs bpipe --since 30s 2>/dev/null | grep -iq "CUDA OOM\|RuntimeError\|IndexError"; then
@@ -112,7 +113,7 @@ test_long_text() {
     fi
 }
 
-# ─── 6. Мусорный текст после перевода (4.7) ────────────────────
+# ─── 6. Мусорный текст после перевода ──────────────────────────
 test_junk_text() {
     local eid="test-junk-$(date +%s)"
     local resp
@@ -146,11 +147,18 @@ test_old_text() {
     assert_field "old_text" "$resp" "filtered_old"
 }
 
-# ─── 9. Не-английский текст фильтруется ────────────────────────
-test_non_english() {
+# ─── 9. Не-английский текст переводится ────────────────────────
+test_translation() {
     local resp
-    resp=$(post_store_item "{\"content\": \"Это тестовый текст на русском языке, который должен быть отфильтрован языковым фильтром.\", \"external_id\": \"test-lang-$(date +%s)\", \"created_at\": \"$(now_iso)\", \"domain\": \"twitter.com\", \"url\": \"https://twitter.com/test/status/7\"}")
-    assert_field "non_english" "$resp" "filtered_lang"
+    resp=$(post_store_item "{\"content\": \"Это тестовый текст на русском языке, который должен быть переведён на английский.\", \"external_id\": \"test-lang-$(date +%s)\", \"created_at\": \"$(now_iso)\", \"domain\": \"twitter.com\", \"url\": \"https://twitter.com/test/status/7\"}")
+    assert_field "translation store_item" "$resp" "OK"
+
+    sleep 8
+    if docker compose logs translator --since 30s 2>/dev/null | grep -q "сегм. за"; then
+        log_pass "translation translator called"
+    else
+        log_fail "translation translator called" "нет строки перевода в логах translator за 30с"
+    fi
 }
 
 # ─── 10. Битый JSON ─────────────────────────────────────────────
@@ -182,10 +190,10 @@ test_gpu_memory() {
     fi
     local used
     used=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits | head -1)
-    if [ "$used" -lt 8192 ]; then
-        log_pass "gpu_memory (${used}MiB / 8192MiB)"
+    if [ "$used" -lt "$GPU_LIMIT_MIB" ]; then
+        log_pass "gpu_memory (${used}MiB / ${GPU_LIMIT_MIB}MiB)"
     else
-        log_fail "gpu_memory" "используется ${used}MiB, упирается в лимит 8192MiB"
+        log_fail "gpu_memory" "используется ${used}MiB, упирается в лимит ${GPU_LIMIT_MIB}MiB"
     fi
 }
 
@@ -197,7 +205,7 @@ test_vpn_egress
 test_bad_json
 test_short_text
 test_over_max_len
-test_non_english
+test_translation
 test_old_text
 test_duplicate
 test_junk_text

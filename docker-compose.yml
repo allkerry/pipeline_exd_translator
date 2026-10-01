@@ -28,6 +28,46 @@ services:
       retries: 8
       start_period: 10s
 
+  # Перевод любой язык → en (NLLB-200 distilled + CTranslate2 int8, GPU).
+  # Первый старт 15–30 мин: скачивание весов + конвертация в ./models_cache.
+  # Стартует ПЕРВЫМ среди GPU-сервисов, чтобы VRAM занималась последовательно.
+  translator:
+    build:
+      context: ./translator
+    container_name: translator
+    restart: unless-stopped
+    logging: *default-logging
+    depends_on:
+      vpn:
+        condition: service_healthy
+    environment:
+      TRANSLATOR_PORT:          "8003"
+      HF_HOME:                  "/root/.cache/huggingface"
+      NLLB_MODEL:               "${NLLB_MODEL:-facebook/nllb-200-distilled-1.3B}"
+      NLLB_CT2_DIR:             "${NLLB_CT2_DIR:-nllb-1.3b-distilled-ct2-int8}"
+      TRANSLATOR_MAX_BATCH:     "${TRANSLATOR_MAX_BATCH:-8}"
+      TRANSLATOR_BEAM:          "${TRANSLATOR_BEAM:-4}"
+      MAX_TRANSLATE_SRC_TOKENS: "${MAX_TRANSLATE_SRC_TOKENS:-600}"
+      USE_PROXY:                "${USE_PROXY_TRANSLATOR:-false}"
+      PROXY_URL:                "http://vpn:1081"
+    expose:
+      - "8003"
+    volumes:
+      - ./models_cache:/root/.cache
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8003/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 120
+      start_period: 120s
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
   transactioneer:
     build:
       context: ./transactioneer
@@ -36,6 +76,8 @@ services:
     logging: *default-logging
     depends_on:
       vpn:
+        condition: service_healthy
+      translator:
         condition: service_healthy
     environment:
       TRANSACTIONEER_PORT: "8002"
@@ -63,13 +105,18 @@ services:
     depends_on:
       transactioneer:
         condition: service_healthy
+      translator:
+        condition: service_healthy
     environment:
       BPIPE_PORT:              "7995"
       TRANSACTIONEER_URL:      "http://transactioneer:8002"
-      FIXED_BATCH_SIZE:        "${FIXED_BATCH_SIZE:-6}"
+      FIXED_BATCH_SIZE:        "${FIXED_BATCH_SIZE:-64}"
+      TAG_BATCH_SIZE:          "${TAG_BATCH_SIZE:-15}"
+      BPIPE_TORCH_DTYPE:       "${BPIPE_TORCH_DTYPE:-float32}"
       BATCH_TIMEOUT_SECONDS:   "${BATCH_TIMEOUT_SECONDS:-3.0}"
       MAX_QUEUE_SIZE:          "${MAX_QUEUE_SIZE:-100}"
       PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:True"
+      CUPY_GPU_MEMORY_LIMIT:   "268435456"
       CUDA_LAUNCH_BLOCKING:    "0"
       MAIN_ADDRESS:            "${MAIN_ADDRESS}"
       USE_PROXY:               "${USE_PROXY_BPIPE:-false}"
@@ -105,13 +152,18 @@ services:
     depends_on:
       transactioneer:
         condition: service_healthy
+      translator:
+        condition: service_healthy
     environment:
       BPIPE_PORT:              "7996"
       TRANSACTIONEER_URL:      "http://transactioneer:8002"
-      FIXED_BATCH_SIZE:        "${FIXED_BATCH_SIZE:-6}"
+      FIXED_BATCH_SIZE:        "${FIXED_BATCH_SIZE:-64}"
+      TAG_BATCH_SIZE:          "${TAG_BATCH_SIZE:-15}"
+      BPIPE_TORCH_DTYPE:       "${BPIPE_TORCH_DTYPE:-float32}"
       BATCH_TIMEOUT_SECONDS:   "${BATCH_TIMEOUT_SECONDS:-3.0}"
       MAX_QUEUE_SIZE:          "${MAX_QUEUE_SIZE:-100}"
       PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:True"
+      CUPY_GPU_MEMORY_LIMIT:   "268435456"
       CUDA_LAUNCH_BLOCKING:    "0"
       MAIN_ADDRESS:            "${MAIN_ADDRESS}"
       USE_PROXY:               "${USE_PROXY_BPIPE:-false}"
@@ -144,13 +196,18 @@ services:
     depends_on:
       transactioneer:
         condition: service_healthy
+      translator:
+        condition: service_healthy
     environment:
       BPIPE_PORT:              "7997"
       TRANSACTIONEER_URL:      "http://transactioneer:8002"
-      FIXED_BATCH_SIZE:        "${FIXED_BATCH_SIZE:-6}"
+      FIXED_BATCH_SIZE:        "${FIXED_BATCH_SIZE:-64}"
+      TAG_BATCH_SIZE:          "${TAG_BATCH_SIZE:-15}"
+      BPIPE_TORCH_DTYPE:       "${BPIPE_TORCH_DTYPE:-float32}"
       BATCH_TIMEOUT_SECONDS:   "${BATCH_TIMEOUT_SECONDS:-3.0}"
       MAX_QUEUE_SIZE:          "${MAX_QUEUE_SIZE:-100}"
       PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:True"
+      CUPY_GPU_MEMORY_LIMIT:   "268435456"
       CUDA_LAUNCH_BLOCKING:    "0"
       MAIN_ADDRESS:            "${MAIN_ADDRESS}"
       USE_PROXY:               "${USE_PROXY_BPIPE:-false}"
@@ -184,13 +241,16 @@ services:
     depends_on:
       bpipe:
         condition: service_healthy
+      translator:
+        condition: service_healthy
     environment:
       UPIPE_PORT:               "5981"
       BPIPE_URLS:               "${BPIPE_URLS:-http://bpipe:7995/}"
-      UPIPE_WORKERS:            "${UPIPE_WORKERS:-2}"
+      UPIPE_WORKERS:            "${UPIPE_WORKERS:-6}"
       UPIPE_QUEUE_LIMIT:        "${UPIPE_QUEUE_LIMIT:-200}"
       MAX_DEPTH_CLASSIFICATION: "${MAX_DEPTH_CLASSIFICATION:-2}"
       MAX_MODEL_TOKENS:         "${MAX_MODEL_TOKENS:-400}"
+      TRANSLATOR_URL:           "http://translator:8003"
       USE_PROXY:                "${USE_PROXY_UPIPE:-false}"
       PROXY_URL:                "http://vpn:1081"
     expose:
@@ -216,7 +276,7 @@ services:
     environment:
       COLLECTOR_PORT:      "9000"
       UPIPE_URL:           "http://upipe:5981/"
-      LANG_FILTER:         "${LANG_FILTER:-en}"
+      LANG_FILTER:         "${LANG_FILTER:-}"
       MIN_TEXT_LEN:        "${MIN_TEXT_LEN:-20}"
       MAX_TEXT_LEN:        "${MAX_TEXT_LEN:-20000}"
       MAX_OLDNESS_SECONDS: "${MAX_OLDNESS_SECONDS:-86400}"

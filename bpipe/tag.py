@@ -31,9 +31,9 @@ def soft_clear_gpu_cache():
     """
     Дешёвая версия clear_gpu_memory(): только empty_cache(), без device
     synchronize() и без gc.collect(). Отдаёт неиспользуемые закэшированные
-    PyTorch-блоки обратно CUDA-аллокатору (важно при 3+ репликах на одной
-    физической GPU — иначе reserved-память каждого процесса растёт и не
-    возвращается), но не даёт полного стопа CPU-стороны конвейера.
+    PyTorch-блоки обратно CUDA-аллокатору (важно, когда GPU делят несколько
+    процессов — иначе reserved-память каждого растёт и не возвращается),
+    но не даёт полного стопа CPU-стороны конвейера.
     """
     try:
         if torch.cuda.is_available():
@@ -69,11 +69,9 @@ def tag(documents: list[str], lab_configuration):
         "TextType": models['TextType']
     }
 
-    # batch_size=len(documents) (один форвард-проход вместо ceil(32/15)=3) убыстряет,
-    # но поднимает ПИК активаций за шаг — с 3 репликами на одной GPU (7.78GiB суммарно)
-    # это и уронило нас в OOM. TAG_HF_BATCH_SIZE даёт крутилку без правки кода:
-    # меньше — безопаснее по памяти, больше — быстрее за счёт меньшего числа проходов.
-    batch_size = min(len(documents), int(os.getenv("TAG_HF_BATCH_SIZE", "32")))
+    # TAG_BATCH_SIZE — размер внутреннего HF-батча (форвард-проход). Меньше — безопаснее
+    # по VRAM (пик активаций), больше — быстрее за счёт меньшего числа проходов.
+    batch_size = max(1, min(len(documents), int(os.getenv("TAG_BATCH_SIZE", "15"))))
     logging.info(f"Using batch_size: {batch_size} for {len(documents)} documents")
 
     # Защита от ошибок на слишком длинных текстах: даже если что-то
@@ -125,8 +123,8 @@ def tag(documents: list[str], lab_configuration):
         # Полный clear_gpu_memory() (synchronize+gc.collect) между шагами убран —
         # это блокирующий барьер + стоп Python-рантайма, основной вклад в 4.78с/батч.
         # Вместо него — soft_clear_gpu_cache() (только empty_cache): отдаёт кэш
-        # CUDA-аллокатора без полной синхронизации, чего хватает, чтобы 3 реплики
-        # не съедали весь 7.78GiB построчно без возврата памяти.
+        # CUDA-аллокатора без полной синхронизации, чего хватает, чтобы процессы
+        # на общей GPU не съедали всю VRAM без возврата памяти.
 
         logging.info("Processing VADER sentiment...")
         vader_scores = [sentiment_analyzer.polarity_scores(text)["compound"] for text in documents]
