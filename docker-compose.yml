@@ -1,0 +1,230 @@
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+
+  vpn:
+    build:
+      context: ./vpn
+    container_name: vpn
+    restart: unless-stopped
+    logging: *default-logging
+    environment:
+      VLESS_URL:     "${VLESS_URL}"
+      SOCKS_PORT:    "1080"
+      HTTP_PORT:     "1081"
+      DISABLE_PQV:   "${VPN_DISABLE_PQV:-false}"
+      XRAY_LOG_LEVEL: "${VPN_LOG_LEVEL:-warning}"
+    ports:
+      - "127.0.0.1:1080:1080"
+      - "127.0.0.1:1081:1081"
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "-x", "socks5h://127.0.0.1:1080", "https://www.gstatic.com/generate_204", "-o", "/dev/null"]
+      interval: 15s
+      timeout: 8s
+      retries: 8
+      start_period: 10s
+
+  transactioneer:
+    build:
+      context: ./transactioneer
+    container_name: transactioneer
+    restart: unless-stopped
+    logging: *default-logging
+    depends_on:
+      vpn:
+        condition: service_healthy
+    environment:
+      TRANSACTIONEER_PORT: "8002"
+      UPLOAD_API_URL:      "http://upload.exorde.network/v1/upload"
+      MAIN_ADDRESS:        "${MAIN_ADDRESS}"
+      UPLOAD_API_TIMEOUT:  "120"
+      UPLOAD_MAX_RETRIES:  "3"
+      USE_PROXY:           "${USE_PROXY_TRANSACTIONEER:-true}"
+      PROXY_URL:           "socks5://vpn:1080"
+    expose:
+      - "8002"
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8002/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+
+  bpipe:
+    build:
+      context: ./bpipe
+    container_name: bpipe
+    restart: unless-stopped
+    logging: *default-logging
+    depends_on:
+      transactioneer:
+        condition: service_healthy
+    environment:
+      BPIPE_PORT:              "7995"
+      TRANSACTIONEER_URL:      "http://transactioneer:8002"
+      FIXED_BATCH_SIZE:        "${FIXED_BATCH_SIZE:-6}"
+      BATCH_TIMEOUT_SECONDS:   "${BATCH_TIMEOUT_SECONDS:-3.0}"
+      MAX_QUEUE_SIZE:          "${MAX_QUEUE_SIZE:-100}"
+      PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:True"
+      CUDA_LAUNCH_BLOCKING:    "0"
+      MAIN_ADDRESS:            "${MAIN_ADDRESS}"
+      USE_PROXY:               "${USE_PROXY_BPIPE:-false}"
+      PROXY_URL:               "http://vpn:1081"
+    expose:
+      - "7995"
+    volumes:
+      - ./models_cache:/root/.cache
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:7995/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 60
+      start_period: 60s
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  # bpipe_2 / bpipe_3 включаются через COMPOSE_PROFILES, который
+  # выставляет run.sh на основе BPIPE_REPLICAS из .env. Руками через
+  # `docker compose up` без run.sh не поднимутся.
+  bpipe_2:
+    profiles: ["bpipe2"]
+    build:
+      context: ./bpipe
+    container_name: bpipe_2
+    restart: unless-stopped
+    logging: *default-logging
+    depends_on:
+      transactioneer:
+        condition: service_healthy
+    environment:
+      BPIPE_PORT:              "7996"
+      TRANSACTIONEER_URL:      "http://transactioneer:8002"
+      FIXED_BATCH_SIZE:        "${FIXED_BATCH_SIZE:-6}"
+      BATCH_TIMEOUT_SECONDS:   "${BATCH_TIMEOUT_SECONDS:-3.0}"
+      MAX_QUEUE_SIZE:          "${MAX_QUEUE_SIZE:-100}"
+      PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:True"
+      CUDA_LAUNCH_BLOCKING:    "0"
+      MAIN_ADDRESS:            "${MAIN_ADDRESS}"
+      USE_PROXY:               "${USE_PROXY_BPIPE:-false}"
+      PROXY_URL:               "http://vpn:1081"
+    expose:
+      - "7996"
+    volumes:
+      - ./models_cache:/root/.cache
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:7996/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 60
+      start_period: 60s
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  bpipe_3:
+    profiles: ["bpipe3"]
+    build:
+      context: ./bpipe
+    container_name: bpipe_3
+    restart: unless-stopped
+    logging: *default-logging
+    depends_on:
+      transactioneer:
+        condition: service_healthy
+    environment:
+      BPIPE_PORT:              "7997"
+      TRANSACTIONEER_URL:      "http://transactioneer:8002"
+      FIXED_BATCH_SIZE:        "${FIXED_BATCH_SIZE:-6}"
+      BATCH_TIMEOUT_SECONDS:   "${BATCH_TIMEOUT_SECONDS:-3.0}"
+      MAX_QUEUE_SIZE:          "${MAX_QUEUE_SIZE:-100}"
+      PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:True"
+      CUDA_LAUNCH_BLOCKING:    "0"
+      MAIN_ADDRESS:            "${MAIN_ADDRESS}"
+      USE_PROXY:               "${USE_PROXY_BPIPE:-false}"
+      PROXY_URL:               "http://vpn:1081"
+    expose:
+      - "7997"
+    volumes:
+      - ./models_cache:/root/.cache
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:7997/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 60
+      start_period: 60s
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  # Round-robin по конкретным URL из BPIPE_URLS (см. upipe.py itertools.cycle) —
+  # ровное распределение элементов, не зависит от DNS/keepalive.
+  upipe:
+    build:
+      context: ./upipe
+    container_name: upipe
+    restart: unless-stopped
+    logging: *default-logging
+    depends_on:
+      bpipe:
+        condition: service_healthy
+    environment:
+      UPIPE_PORT:               "5981"
+      BPIPE_URLS:               "${BPIPE_URLS:-http://bpipe:7995/}"
+      UPIPE_WORKERS:            "${UPIPE_WORKERS:-2}"
+      UPIPE_QUEUE_LIMIT:        "${UPIPE_QUEUE_LIMIT:-200}"
+      MAX_DEPTH_CLASSIFICATION: "${MAX_DEPTH_CLASSIFICATION:-2}"
+      MAX_MODEL_TOKENS:         "${MAX_MODEL_TOKENS:-400}"
+      USE_PROXY:                "${USE_PROXY_UPIPE:-false}"
+      PROXY_URL:                "http://vpn:1081"
+    expose:
+      - "5981"
+    volumes:
+      - ./models_cache:/root/.cache
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:5981/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 60
+      start_period: 60s
+
+  collector:
+    build:
+      context: ./collector
+    container_name: collector
+    restart: unless-stopped
+    logging: *default-logging
+    depends_on:
+      upipe:
+        condition: service_healthy
+    environment:
+      COLLECTOR_PORT:      "9000"
+      UPIPE_URL:           "http://upipe:5981/"
+      LANG_FILTER:         "${LANG_FILTER:-en}"
+      MIN_TEXT_LEN:        "${MIN_TEXT_LEN:-20}"
+      MAX_TEXT_LEN:        "${MAX_TEXT_LEN:-20000}"
+      MAX_OLDNESS_SECONDS: "${MAX_OLDNESS_SECONDS:-86400}"
+    ports:
+      - "9000:9000"
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:9000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
