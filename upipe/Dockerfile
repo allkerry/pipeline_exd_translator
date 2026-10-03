@@ -21,6 +21,16 @@ RUN git clone --branch full --single-branch --no-recurse-submodules --depth 1 \
     && pip install --no-cache-dir /tmp/exorde_data \
     && rm -rf /tmp/exorde_data
 
+# tiktoken при первом обращении качает r50k_base.tiktoken с
+# openaipublic.blob.core.windows.net. В рантайме у контейнера выхода в
+# интернет нет (DNS не резолвится), поэтому кодировку скачиваем ЗАРАНЕЕ,
+# при сборке образа (там сеть есть, как и для pip).
+# Кэш кладём в /opt/tiktoken, а НЕ в /root/.cache: эта папка перекрывается
+# volume ./models_cache и файл бы пропал.
+ENV TIKTOKEN_CACHE_DIR=/opt/tiktoken
+RUN mkdir -p /opt/tiktoken \
+    && python -c "import tiktoken; e = tiktoken.get_encoding('r50k_base'); assert e.encode('hello'); print('✅ tiktoken r50k_base cached')"
+
 COPY . .
 
 CMD ["python", "upipe.py"]
