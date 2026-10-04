@@ -2,6 +2,7 @@ import os
 import re
 import threading
 import time
+from collections import Counter
 
 import requests
 from langdetect import detect_langs, DetectorFactory, LangDetectException
@@ -11,7 +12,8 @@ from evaluate_token_count import evaluate_token_count, MAX_MODEL_TOKENS
 
 DetectorFactory.seed = 0
 
-LANG_CONFIDENCE_THRESHOLD = float(os.getenv("LANG_CONFIDENCE_THRESHOLD", "0.90"))
+# Если у предложения вероятность en >= этого значения — считаем его английским
+EN_KEEP_PROB = float(os.getenv("EN_KEEP_PROB", "0.40"))
 TRANSLATOR_URL = os.getenv("TRANSLATOR_URL", "http://translator:8003").rstrip("/")
 TRANSLATOR_TIMEOUT = float(os.getenv("TRANSLATOR_TIMEOUT", "90"))
 
@@ -31,6 +33,9 @@ LANG_TO_NLLB = {
 ISO_OVERRIDE = {"zh-cn": "zh", "zh-tw": "zh"}
 
 _SENT_RE = re.compile(r"[^.!?…。！？\n]+[.!?…。！？]*\s*")
+_SPLIT_RE = re.compile(r"(?<=[.!?…؟।])\s+|(?<=[。！？])|\n+")
+_URL_RE = re.compile(r"https?://\S+|www\.\S+")
+_NOISE_RE = re.compile(r"[@#$]\w+")
 _local = threading.local()
 
 
@@ -50,17 +55,18 @@ def _session() -> requests.Session:
     return s
 
 
-def _call_translator(text: str, src: str):
+def _call_translator(items: list) -> list:
+    """items: [{"text":..., "src":...}] -> список {"text","truncated"} | None, в том же порядке."""
     last = "?"
     for attempt in range(3):
         try:
             r = _session().post(
                 f"{TRANSLATOR_URL}/translate",
-                json={"items": [{"text": text, "src": src}]},
+                json={"items": items},
                 timeout=TRANSLATOR_TIMEOUT,
             )
             if r.status_code == 200:
-                return r.json()["translations"][0]
+                return r.json()["translations"]
             last = f"HTTP {r.status_code}"
             if r.status_code != 503:
                 break
@@ -96,34 +102,72 @@ def _fit_tokens(text: str) -> str:
     return " ".join(words[:lo])
 
 
+def _detect_sentence(s: str) -> str:
+    """Возвращает 'en' (оставить как есть) или код langdetect из LANG_TO_NLLB (переводить)."""
+    cleaned = _NOISE_RE.sub(" ", _URL_RE.sub(" ", s))
+    if not any(c.isalpha() for c in cleaned):
+        return "en"
+    try:
+        cands = detect_langs(cleaned)
+    except LangDetectException:
+        return "en"
+    if not cands:
+        return "en"
+    probs = {c.lang: c.prob for c in cands}
+    top = cands[0]
+    if top.lang == "en" or probs.get("en", 0.0) >= EN_KEEP_PROB:
+        return "en"
+    return top.lang if top.lang in LANG_TO_NLLB else "en"
+
+
 def translate(item: Item, installed_languages, low_memory: bool = False) -> Translation:
     content = str(item.content)
 
     if not content or not any(c.isalpha() for c in content):
         return Translation(language=Language(""), translation=Translated(""))
 
-    try:
-        candidates = detect_langs(content)
-    except LangDetectException:
+    parts = [p.strip() for p in _SPLIT_RE.split(content) if p and p.strip()]
+    if not parts:
         return Translation(language=Language(""), translation=Translated(""))
 
-    if not candidates:
-        return Translation(language=Language(""), translation=Translated(""))
+    # группируем подряд идущие предложения одного языка
+    groups: list = []  # [lang, [sentences]]
+    for p in parts:
+        lang = _detect_sentence(p)
+        if groups and groups[-1][0] == lang:
+            groups[-1][1].append(p)
+        else:
+            groups.append([lang, [p]])
 
-    top = candidates[0]
-    if top.lang == "en":
-        return Translation(language=Language("en"), translation=Translated(content))
+    to_translate = [
+        {"text": " ".join(sents), "src": LANG_TO_NLLB[lang]}
+        for lang, sents in groups if lang != "en"
+    ]
 
-    if top.prob < LANG_CONFIDENCE_THRESHOLD or top.lang not in LANG_TO_NLLB:
-        raise NonEnglishError(f"язык не поддержан/неуверенно: {top.lang} (p={top.prob:.2f})")
+    # полностью английский текст — без вызова translator
+    if not to_translate:
+        return Translation(language=Language("en"), translation=Translated(_fit_tokens(content)))
 
-    res = _call_translator(content, LANG_TO_NLLB[top.lang])
-    text = (res or {}).get("text", "").strip() if res else ""
-    if not text:
+    results = iter(_call_translator(to_translate))
+    out: list = []
+    lang_chars: Counter = Counter()
+    for lang, sents in groups:
+        if lang == "en":
+            out.append(" ".join(sents))
+            continue
+        res = next(results)
+        t = (res or {}).get("text", "").strip() if res else ""
+        if t:
+            out.append(t)
+            lang_chars[lang] += sum(len(s) for s in sents)
+
+    text = " ".join(out).strip()
+    if not text or not lang_chars:
         raise ValueError("No content to work with")
 
     text = _fit_tokens(text)
+    main_lang = lang_chars.most_common(1)[0][0]
     return Translation(
-        language=Language(ISO_OVERRIDE.get(top.lang, top.lang)),
+        language=Language(ISO_OVERRIDE.get(main_lang, main_lang)),
         translation=Translated(text),
     )
